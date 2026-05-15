@@ -1,0 +1,78 @@
+from collections import deque
+
+# BFS
+
+def bfs(start_state):
+    visited = set()
+
+    queue = deque()
+
+    start_node = PuzzleNode(start_state)
+    queue.append(start_node)
+
+    visited.add(tuple(start_state))
+
+    while queue:
+        current_node = queue.popleft()
+
+        if current_node.state == GOAL_STATE:
+            return current_node
+
+        for neighbor_state, move in get_neighbors(current_node.state):
+            if tuple(neighbor_state) not in visited:
+                visited.add(tuple(neighbor_state))
+
+                child_node = PuzzleNode(
+                    neighbor_state,
+                    current_node,
+                    move
+                )
+
+                queue.append(child_node)
+
+    return None
+
+
+# Truy vết lời giải
+
+def get_solution(goal_node):
+    path = []
+
+    current = goal_node
+
+    while current.parent is not None:
+        path.append((current.move, current.state))
+        current = current.parent
+
+    path.reverse()
+
+    return path
+
+
+# Trạng thái ban đầu
+start_state = [1, 2, 3,
+               4, 5, 6,
+               0, 7, 8]
+
+print("TRẠNG THÁI BAN ĐẦU:\n")
+print_state(start_state)
+
+# Chạy BFS
+result = bfs(start_state)
+
+if result:
+    print("ĐÃ TÌM THẤY LỜI GIẢI!\n")
+
+    solution = get_solution(result)
+
+    step = 1
+
+    for move, state in solution:
+        print(f"STEP {step}: {move}")
+        print_state(state)
+        step += 1
+
+    print("HOÀN THÀNH!")
+
+else:
+    print("Không tìm thấy lời giải")
