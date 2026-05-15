@@ -1,0 +1,196 @@
+import random
+import time
+
+class VacuumCleanerAgent:
+
+    def __init__(self, rows, cols):
+
+        self.rows = rows
+        self.cols = cols
+
+        # Vị trí trước đó
+        self.previous_position = None
+
+        # Các ô đã đi qua
+        self.visited = set()
+
+        # Tạo môi trường ngẫu nhiên
+        # 0 = bẩn, 1 = sạch
+        self.environment = [
+            [random.randint(0, 1) for _ in range(cols)]
+            for _ in range(rows)
+        ]
+
+        # Vị trí bắt đầu ngẫu nhiên
+        self.x = random.randint(0, rows - 1)
+        self.y = random.randint(0, cols - 1)
+
+        # Đếm bước
+        self.steps = 0
+
+    # HIỂN THỊ MÔI TRƯỜNG
+    def display_environment(self):
+
+        print("\nMôi trường:")
+
+        for i in range(self.rows):
+
+            for j in range(self.cols):
+
+                if i == self.x and j == self.y:
+                    print("R", end=" ")
+
+                else:
+                    print(self.environment[i][j], end=" ")
+
+            print()
+
+    # PERCEPT
+    def percept(self):
+
+        # Đánh dấu đã ghé thăm
+        self.visited.add((self.x, self.y))
+
+        current_state = self.environment[self.x][self.y]
+
+        return {
+            "position": (self.x, self.y),
+            "state": current_state
+        }
+
+    # ACTION: HÚT BỤI
+    def suck(self):
+
+        self.environment[self.x][self.y] = 1
+        print(f"Hút bụi tại ({self.x}, {self.y})")
+
+    # DI CHUYỂN
+    def move_up(self):
+        self.x -= 1
+
+    def move_down(self):
+        self.x += 1
+
+    def move_left(self):
+        self.y -= 1
+
+    def move_right(self):
+        self.y += 1
+
+    # RULES
+    def possible_moves(self):
+
+        unvisited_moves = []
+        visited_moves = []
+
+        directions = {
+            "UP":    (self.x - 1, self.y),
+            "DOWN":  (self.x + 1, self.y),
+            "LEFT":  (self.x, self.y - 1),
+            "RIGHT": (self.x, self.y + 1)
+        }
+
+        for move, (nx, ny) in directions.items():
+
+            # Kiểm tra còn trong ma trận
+            if 0 <= nx < self.rows and 0 <= ny < self.cols:
+
+                # Nếu chưa thăm
+                if (nx, ny) not in self.visited:
+                    unvisited_moves.append(move)
+
+                else:
+                    visited_moves.append(move)
+        # Ưu tiên ô chưa đi qua
+        if unvisited_moves:
+            return unvisited_moves
+
+        # Nếu mọi ô đều đã đi
+            return visited_moves
+
+    # CHỌN HÀNH ĐỘNG
+    def choose_action(self, percept):
+
+        state = percept["state"]
+
+        # Nếu ô bẩn -> hút bụi
+        if state == 0:
+            return "SUCK"
+
+        # Nếu ô sạch -> di chuyển
+        else:
+            moves = self.possible_moves()
+            return random.choice(moves)
+
+    # THỰC HIỆN ACTION
+    def execute_action(self, action):
+
+        if action == "SUCK":
+
+            self.suck()
+
+        else:
+
+            # Lưu vị trí hiện tại
+            self.previous_position = (self.x, self.y)
+
+            if action == "UP":
+                self.move_up()
+
+            elif action == "DOWN":
+                self.move_down()
+
+            elif action == "LEFT":
+                self.move_left()
+
+            elif action == "RIGHT":
+                self.move_right()
+
+        print("Action:", action)
+
+    # KIỂM TRA ĐÃ SẠCH HẾT CHƯA
+    def is_clean(self):
+
+        for row in self.environment:
+
+            if 0 in row:
+                return False
+
+        return True
+
+    # CHẠY AGENT
+    def run(self):
+
+        print("=== BẮT ĐẦU SIMPLE REFLEX AGENT ===")
+
+        while not self.is_clean():
+
+            self.steps += 1
+
+            print(f"\n===== STEP {self.steps} =====")
+
+            self.display_environment()
+
+            percept = self.percept()
+
+            print("Percept:", percept)
+
+            action = self.choose_action(percept)
+
+            self.execute_action(action)
+
+            time.sleep(0.5)
+
+        print("\n=== HOÀN THÀNH ===")
+        print(f"Tổng số bước: {self.steps}")
+
+        self.display_environment()
+
+
+# MAIN
+rows = 4
+cols = 4
+
+agent = VacuumCleanerAgent(rows, cols)
+
+agent.run()
