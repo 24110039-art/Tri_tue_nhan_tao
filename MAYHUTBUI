@@ -1,0 +1,1121 @@
+import sys
+import random
+import heapq
+from collections import deque
+
+from PyQt6.QtCore import Qt, QTimer, QPoint, QPropertyAnimation, QEasingCurve
+from PyQt6.QtGui import QColor, QFont, QPixmap, QPainter, QBrush, QPen, QRadialGradient
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QPushButton, QLabel,
+    QTextEdit, QSpinBox, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QFrame, QScrollArea,
+)
+
+
+# ─────────────────────────────────────────────────────────────
+# ROBOT ICON – vẽ bằng QPainter, trả về QPixmap
+# ─────────────────────────────────────────────────────────────
+
+def make_robot_pixmap(size=60):
+    px = QPixmap(size, size)
+    px.fill(Qt.GlobalColor.transparent)
+    p = QPainter(px)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    cx, cy = size // 2, size // 2
+    r = size // 2 - 3
+
+    # glow
+    grad = QRadialGradient(cx, cy, r)
+    grad.setColorAt(0,   QColor(100, 200, 255, 180))
+    grad.setColorAt(0.6, QColor(30,  120, 220, 140))
+    grad.setColorAt(1,   QColor(10,   60, 180,   0))
+    p.setBrush(QBrush(grad))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawEllipse(2, 2, size - 4, size - 4)
+
+    # body
+    p.setBrush(QBrush(QColor(30, 130, 230)))
+    p.setPen(QPen(QColor(255, 255, 255), 2))
+    body_r = int(r * 0.72)
+    p.drawEllipse(cx - body_r, cy - body_r, body_r * 2, body_r * 2)
+
+    # face plate
+    p.setBrush(QBrush(QColor(20, 60, 140)))
+    p.setPen(Qt.PenStyle.NoPen)
+    fp = int(body_r * 0.6)
+    p.drawEllipse(cx - fp, cy - fp, fp * 2, fp * 2)
+
+    # left eye
+    p.setBrush(QBrush(QColor(0, 255, 200)))
+    ew = max(4, size // 12)
+    p.drawEllipse(cx - body_r // 3 - ew // 2, cy - body_r // 4 - ew // 2, ew, ew)
+    # right eye
+    p.drawEllipse(cx + body_r // 3 - ew // 2, cy - body_r // 4 - ew // 2, ew, ew)
+
+    # mouth (arc)
+    p.setPen(QPen(QColor(0, 255, 200), max(2, size // 18)))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    mouth_r = int(body_r * 0.35)
+    p.drawArc(cx - mouth_r, cy + mouth_r // 3, mouth_r * 2, mouth_r, 0, -180 * 16)
+
+    # suction ring
+    p.setPen(QPen(QColor(255, 200, 0), max(2, size // 16)))
+    ring_r = int(r * 0.88)
+    p.drawArc(cx - ring_r, cy - ring_r, ring_r * 2, ring_r * 2, 210 * 16, 120 * 16)
+
+    p.end()
+    return px
+
+
+# ─────────────────────────────────────────────────────────────
+# CELL
+# ─────────────────────────────────────────────────────────────
+
+CELL_SIZE = 65
+
+class Cell(QPushButton):
+    def __init__(self, row, col):
+        super().__init__()
+        self.row = row
+        self.col = col
+        self.state   = 0   # 0=sạch 1=bụi 2=vật cản
+        self.cleaned = False
+        self.setFixedSize(CELL_SIZE, CELL_SIZE)
+        self.update_color()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.state   = (self.state + 1) % 3
+            self.cleaned = False
+            self.update_color()
+
+    def update_color(self):
+        if self.state == 2:
+            self.setStyleSheet("QPushButton{background:#222;border:1px solid #555;}")
+            self.setText("")
+        elif self.cleaned:
+            self.setStyleSheet("QPushButton{background:#6FAEFF;border:1px solid #999;}")
+            self.setText("")
+        elif self.state == 1:
+            self.setStyleSheet("""
+                QPushButton{background:white;border:1px solid #999;
+                            color:#8B5A2B;font-size:26px;font-weight:bold;}
+            """)
+            self.setText("✹")
+        else:
+            self.setStyleSheet("QPushButton{background:white;border:1px solid #999;}")
+            self.setText("")
+
+
+# ─────────────────────────────────────────────────────────────
+# ROBOT OVERLAY LABEL  (nằm trên grid_widget)
+# ─────────────────────────────────────────────────────────────
+
+class RobotLabel(QLabel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setFixedSize(CELL_SIZE, CELL_SIZE)
+        px = make_robot_pixmap(CELL_SIZE - 6)
+        lbl_px = QPixmap(CELL_SIZE, CELL_SIZE)
+        lbl_px.fill(Qt.GlobalColor.transparent)
+        p = QPainter(lbl_px)
+        p.drawPixmap(3, 3, px)
+        p.end()
+        self.setPixmap(lbl_px)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.raise_()
+        self.hide()
+
+    def move_to_cell(self, r, c):
+        spacing = 4
+        margin  = 4
+        self.move(
+            margin + c * (CELL_SIZE + spacing),
+            margin + r * (CELL_SIZE + spacing),
+        )
+        self.show()
+        self.raise_()
+
+
+# ─────────────────────────────────────────────────────────────
+# MAIN WINDOW
+# ─────────────────────────────────────────────────────────────
+
+class VacuumApp(QMainWindow):
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Mô phỏng BFS / DFS / IDS / Greedy / A* – Máy hút bụi")
+        self.resize(1700, 950)
+
+        self.rows = 6
+        self.cols = 6
+        self.algorithm = "BFS1"
+        self.path = []
+        self.current_step = 0
+        self.start_pos = (0, 0)
+
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.run_animation)
+
+        self.init_ui()
+
+    # ──────────────────────────────────────
+    # UI
+    # ──────────────────────────────────────
+
+    def init_ui(self):
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        main_layout = QHBoxLayout()
+        main_widget.setLayout(main_layout)
+
+        # LEFT MENU
+        menu_frame = QFrame()
+        menu_frame.setFixedWidth(180)
+        menu_frame.setStyleSheet("QFrame{background:#1E2A38;border-radius:10px;}")
+        menu_layout = QVBoxLayout()
+        menu_frame.setLayout(menu_layout)
+
+        title = QLabel("MENU")
+        title.setStyleSheet("color:white;font-size:22px;font-weight:bold;padding:12px;")
+        menu_layout.addWidget(title)
+
+        algo_colors = {
+            "BFS1": "#2F80ED", "BFS2": "#2F80ED",
+            "DFS1": "#27AE60", "DFS2": "#27AE60",
+            "IDS":  "#8E44AD", "Greedy": "#E67E22", "A*": "#C0392B",
+        }
+        self.menu_buttons = []
+        for name in ["BFS1", "BFS2", "DFS1", "DFS2", "IDS", "Greedy", "A*"]:
+            btn = QPushButton(name)
+            btn.setMinimumHeight(60)
+            col = algo_colors[name]
+            btn.setStyleSheet(f"""
+                QPushButton{{background:{col};color:white;border:none;border-radius:10px;
+                             font-size:18px;font-weight:bold;margin:3px 6px;}}
+                QPushButton:hover{{background:#1C6DD0;}}
+            """)
+            btn.clicked.connect(lambda checked, n=name: self.choose_algorithm(n))
+            self.menu_buttons.append(btn)
+            menu_layout.addWidget(btn)
+
+        menu_layout.addStretch()
+        main_layout.addWidget(menu_frame)
+
+        # ── CENTER: ma trận + giải pháp ──────────────────────────
+        center_layout = QVBoxLayout()
+        center_layout.setSpacing(8)
+
+        # toolbar
+        top_layout = QHBoxLayout()
+        top_layout.addWidget(QLabel("Rows:"))
+        self.row_spin = QSpinBox(); self.row_spin.setValue(6); self.row_spin.setRange(2, 15)
+        top_layout.addWidget(self.row_spin)
+        top_layout.addWidget(QLabel("Cols:"))
+        self.col_spin = QSpinBox(); self.col_spin.setValue(6); self.col_spin.setRange(2, 15)
+        top_layout.addWidget(self.col_spin)
+
+        self.create_btn = QPushButton("Tạo ma trận")
+        self.random_btn = QPushButton("Random")
+        self.start_btn  = QPushButton("▶ Start")
+        self.reset_btn  = QPushButton("↺ Reset")
+
+        self.start_btn.setStyleSheet(
+            "QPushButton{background:#42C767;color:white;font-weight:bold;border-radius:8px;padding:10px;}"
+        )
+        self.reset_btn.setStyleSheet(
+            "QPushButton{background:#F4D1CC;border-radius:8px;padding:10px;}"
+        )
+        for btn in [self.create_btn, self.random_btn, self.start_btn, self.reset_btn]:
+            btn.setMinimumHeight(40)
+            top_layout.addWidget(btn)
+
+        top_layout.addStretch()
+        center_layout.addLayout(top_layout)
+
+        # grid frame (ma trận)
+        grid_frame = QFrame()
+        grid_frame.setStyleSheet("QFrame{background:#F8F8F8;border:2px solid #DDD;border-radius:10px;}")
+        grid_layout_main = QVBoxLayout()
+        grid_layout_main.setContentsMargins(10, 8, 10, 10)
+        grid_frame.setLayout(grid_layout_main)
+
+        self.legend_label = QLabel("🤖 Máy hút bụi    ■ Vật cản    ✹ Bụi    🟦 Đã dọn")
+        self.legend_label.setStyleSheet("font-size:15px;padding:4px 2px;")
+        grid_layout_main.addWidget(self.legend_label)
+
+        # grid_widget – parent của RobotLabel (absolute positioning)
+        self.grid_widget = QWidget()
+        self.grid_widget.setStyleSheet("background:transparent;")
+        self.grid_layout = QGridLayout()
+        self.grid_layout.setSpacing(4)          # ← khoảng cách giữa các ô
+        self.grid_layout.setContentsMargins(4, 4, 4, 4)
+        self.grid_widget.setLayout(self.grid_layout)
+
+        # robot overlay
+        self.robot_label = RobotLabel(self.grid_widget)
+
+        scroll = QScrollArea()
+        scroll.setWidget(self.grid_widget)
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
+        grid_layout_main.addWidget(scroll)
+
+        self.status_label = QLabel("Trạng thái: Sẵn sàng")
+        self.status_label.setStyleSheet(
+            "font-size:15px;padding:6px 4px;color:#333;"
+        )
+        grid_layout_main.addWidget(self.status_label)
+
+        # ma trận chiếm ~55% chiều cao center
+        center_layout.addWidget(grid_frame, stretch=55)
+
+        # solution frame – nằm DƯỚI ma trận, chiếm ~45%
+        solution_frame = QFrame()
+        solution_frame.setStyleSheet("QFrame{background:white;border:2px solid #DDD;border-radius:10px;}")
+        solution_layout = QVBoxLayout()
+        solution_layout.setContentsMargins(10, 8, 10, 10)
+        solution_frame.setLayout(solution_layout)
+
+        lbl3 = QLabel("📊 GIẢI PHÁP & SO SÁNH THUẬT TOÁN")
+        lbl3.setStyleSheet("font-size:15px;font-weight:bold;padding:4px 2px;color:#1E2A38;")
+        solution_layout.addWidget(lbl3)
+
+        self.solution_text = QTextEdit()
+        self.solution_text.setReadOnly(True)
+        solution_layout.addWidget(self.solution_text)
+
+        center_layout.addWidget(solution_frame, stretch=45)
+
+        main_layout.addLayout(center_layout, stretch=55)
+
+        # ── RIGHT: nguyên lý + task cân bằng nhau 50/50 ──────────
+        right_layout = QVBoxLayout()
+        right_layout.setSpacing(8)
+
+        # principle frame – 50%
+        principle_frame = QFrame()
+        principle_frame.setStyleSheet("QFrame{background:white;border:2px solid #DDD;border-radius:10px;}")
+        principle_layout = QVBoxLayout()
+        principle_layout.setContentsMargins(10, 8, 10, 10)
+        principle_frame.setLayout(principle_layout)
+
+        lbl = QLabel("📖 NGUYÊN LÝ THUẬT TOÁN")
+        lbl.setStyleSheet("font-size:15px;font-weight:bold;padding:4px 2px;color:#1E2A38;")
+        principle_layout.addWidget(lbl)
+
+        self.principle_text = QTextEdit()
+        self.principle_text.setReadOnly(True)
+        principle_layout.addWidget(self.principle_text)
+
+        right_layout.addWidget(principle_frame, stretch=1)
+
+        # task frame – 50%
+        task_frame = QFrame()
+        task_frame.setStyleSheet("QFrame{background:white;border:2px solid #DDD;border-radius:10px;}")
+        task_layout = QVBoxLayout()
+        task_layout.setContentsMargins(10, 8, 10, 10)
+        task_frame.setLayout(task_layout)
+
+        lbl2 = QLabel("📋 TASK – Các bước thực hiện")
+        lbl2.setStyleSheet("font-size:15px;font-weight:bold;padding:4px 2px;color:#1E2A38;")
+        task_layout.addWidget(lbl2)
+
+        self.task_text = QTextEdit()
+        self.task_text.setReadOnly(True)
+        task_layout.addWidget(self.task_text)
+
+        right_layout.addWidget(task_frame, stretch=1)
+
+        main_layout.addLayout(right_layout, stretch=45)
+
+        # events
+        self.create_btn.clicked.connect(self.create_grid)
+        self.random_btn.clicked.connect(self.random_grid)
+        self.start_btn.clicked.connect(self.start_algorithm)
+        self.reset_btn.clicked.connect(self.reset_grid)
+
+        self.create_grid()
+        self.show_principle("BFS1")
+
+    # ──────────────────────────────────────
+    # PRINCIPLES
+    # ──────────────────────────────────────
+
+    PRINCIPLES = {
+        "BFS1": """<b style='color:#2F80ED;'>BFS1 – Tìm kiếm theo chiều rộng (Queue)</b><br><br>
+• Duyệt lần lượt từng tầng (level-by-level) từ nút gốc ra ngoài.<br>
+• Sử dụng <b>hàng đợi (Queue – FIFO)</b>: nút nào vào trước, ra trước.<br>
+• Đảm bảo tìm đường ngắn nhất (theo số bước) nếu chi phí đồng đều.<br>
+• BFS1: Duyệt hàng xóm theo thứ tự <b>Trên → Dưới → Trái → Phải</b>.<br>
+• Mỗi ô chỉ được thăm <b>đúng một lần</b>; ô đã thăm không thêm lại queue.""",
+
+        "BFS2": """<b style='color:#2F80ED;'>BFS2 – Tìm kiếm theo chiều rộng (biến thể)</b><br><br>
+• Tương tự BFS1 nhưng duyệt hàng xóm <b>Phải → Trái → Dưới → Trên</b>.<br>
+• Vẫn dùng <b>Queue – FIFO</b>; so sánh thứ tự duyệt khác nhau.<br>
+• Ứng dụng: ưu tiên hướng phải/trái trước trên/dưới.""",
+
+        "DFS1": """<b style='color:#27AE60;'>DFS1 – Tìm kiếm theo chiều sâu (Stack)</b><br><br>
+• Đi sâu nhất có thể theo một nhánh trước khi quay lui.<br>
+• Sử dụng <b>ngăn xếp (Stack – LIFO)</b>: nút nào vào sau, ra trước.<br>
+• DFS1: Đẩy hàng xóm <b>ngược (reversed)</b> → duyệt Trên→Dưới→Trái→Phải.<br>
+• Mỗi ô chỉ được thăm <b>đúng một lần</b>.""",
+
+        "DFS2": """<b style='color:#27AE60;'>DFS2 – Tìm kiếm theo chiều sâu (biến thể)</b><br><br>
+• Đẩy hàng xóm <b>không đảo ngược</b> → Phải→Trái→Dưới→Trên.<br>
+• So sánh hành vi duyệt khi thay đổi thứ tự stack.<br>
+• Vẫn dùng <b>Stack – LIFO</b>.""",
+
+        "IDS": """<b style='color:#8E44AD;'>IDS – Iterative Deepening Search</b><br><br>
+• Kết hợp BFS (ngắn nhất) và DFS (ít bộ nhớ).<br>
+• Lặp DFS với giới hạn độ sâu <b>l = 0, 1, 2, 3, …</b> tăng dần.<br>
+• Mỗi vòng gọi <b>DEPTH-LIMITED-SEARCH(problem, l)</b>.<br>
+• Nếu kết quả ≠ cutoff → trả về kết quả.<br>
+• Độ phức tạp: O(b^d) thời gian; O(b×d) bộ nhớ.""",
+
+        "Greedy": """<b style='color:#E67E22;'>Greedy Search – Tìm kiếm tham lam</b><br><br>
+• Luôn chọn trạng thái có <b>h(n) nhỏ nhất</b> trong FRONTIER.<br>
+• <b>h(n)</b> = Manhattan distance đến ô bụi gần nhất chưa dọn.<br>
+• Nhanh nhưng <b>không đảm bảo tối ưu</b>; có thể bị kẹt vòng lặp.""",
+
+        "A*": """<b style='color:#C0392B;'>A* Search – Tìm kiếm A sao</b><br><br>
+• Chọn trạng thái có <b>f(n) = g(n) + h(n) nhỏ nhất</b>.<br>
+• <b>g(n)</b>: chi phí thực từ Start; <b>h(n)</b>: Manhattan đến bụi gần nhất.<br>
+• <b>Tối ưu và đầy đủ</b> khi h(n) là admissible heuristic.""",
+    }
+
+    def show_principle(self, name):
+        self.principle_text.clear()
+        self.principle_text.append(self.PRINCIPLES.get(name, ""))
+
+    # ──────────────────────────────────────
+    # CHOOSE ALGO
+    # ──────────────────────────────────────
+
+    def choose_algorithm(self, name):
+        self.algorithm = name
+        self.status_label.setText(f"Trạng thái: Đã chọn {name}")
+        self.show_principle(name)
+
+    # ──────────────────────────────────────
+    # GRID
+    # ──────────────────────────────────────
+
+    def create_grid(self):
+        self.rows = self.row_spin.value()
+        self.cols = self.col_spin.value()
+
+        while self.grid_layout.count():
+            item = self.grid_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        self.cells = []
+        for r in range(self.rows):
+            row = []
+            for c in range(self.cols):
+                cell = Cell(r, c)
+                self.grid_layout.addWidget(cell, r, c)
+                row.append(cell)
+            self.cells.append(row)
+
+        spacing = 4
+        margin  = 4
+        self.grid_widget.setFixedSize(
+            margin * 2 + self.cols * CELL_SIZE + (self.cols - 1) * spacing,
+            margin * 2 + self.rows * CELL_SIZE + (self.rows - 1) * spacing,
+        )
+        self.robot_label.hide()
+
+    def random_grid(self):
+        for r in range(self.rows):
+            for c in range(self.cols):
+                self.cells[r][c].state   = random.choice([0, 0, 0, 1, 1, 2])
+                self.cells[r][c].cleaned = False
+                self.cells[r][c].update_color()
+        self.robot_label.hide()
+
+    def reset_grid(self):
+        self.timer.stop()
+        for r in range(self.rows):
+            for c in range(self.cols):
+                self.cells[r][c].state   = 0
+                self.cells[r][c].cleaned = False
+                self.cells[r][c].update_color()
+        self.task_text.clear()
+        self.solution_text.clear()
+        self.status_label.setText("Trạng thái: Sẵn sàng")
+        self.robot_label.hide()
+
+    # ──────────────────────────────────────
+    # PICK RANDOM START
+    # ──────────────────────────────────────
+
+    def pick_random_start(self):
+        """Chọn ngẫu nhiên ô không phải vật cản làm vị trí bắt đầu."""
+        candidates = [
+            (r, c)
+            for r in range(self.rows)
+            for c in range(self.cols)
+            if self.cells[r][c].state != 2
+        ]
+        if not candidates:
+            return (0, 0)
+        return random.choice(candidates)
+
+    # ──────────────────────────────────────
+    # NEIGHBORS
+    # ──────────────────────────────────────
+
+    def neighbors(self, r, c, reverse=False):
+        dirs = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+        if reverse:
+            dirs = list(reversed(dirs))
+        result = []
+        for dr, dc in dirs:
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < self.rows and 0 <= nc < self.cols:
+                if self.cells[nr][nc].state != 2:
+                    result.append((nr, nc))
+        return result
+
+    # ──────────────────────────────────────
+    # HEURISTIC
+    # ──────────────────────────────────────
+
+    def heuristic(self, r, c):
+        min_dist = float('inf')
+        for row in range(self.rows):
+            for col in range(self.cols):
+                cell = self.cells[row][col]
+                if cell.state == 1 and not cell.cleaned:
+                    d = abs(r - row) + abs(c - col)
+                    if d < min_dist:
+                        min_dist = d
+        return min_dist if min_dist != float('inf') else 0
+
+    # ──────────────────────────────────────
+    # START
+    # ──────────────────────────────────────
+
+    def start_algorithm(self):
+        self.timer.stop()
+        self.task_text.clear()
+        self.solution_text.clear()
+        self.show_principle(self.algorithm)
+
+        # reset cleaned state (giữ nguyên bụi / vật cản)
+        for r in range(self.rows):
+            for c in range(self.cols):
+                if self.cells[r][c].state != 2:
+                    self.cells[r][c].cleaned = False
+                    self.cells[r][c].update_color()
+
+        # random start
+        start = self.pick_random_start()
+        self.start_pos = start
+        self.task_text.append(
+            f"<b>🎲 Vị trí bắt đầu ngẫu nhiên: <span style='color:#E67E22;'>{start}</span></b><br>"
+        )
+
+        # đặt robot ngay tại start
+        self.robot_label.move_to_cell(*start)
+
+        algo = self.algorithm
+        if algo == "BFS1":
+            self.path = self.bfs(start, reverse=False)
+        elif algo == "BFS2":
+            self.path = self.bfs(start, reverse=True)
+        elif algo == "DFS1":
+            self.path = self.dfs(start, push_reversed=True)
+        elif algo == "DFS2":
+            self.path = self.dfs(start, push_reversed=False)
+        elif algo == "IDS":
+            self.path = self.ids(start)
+        elif algo == "Greedy":
+            self.path = self.greedy(start)
+        elif algo == "A*":
+            self.path = self.astar(start)
+
+        self.current_step = 0
+        self.timer.start(400)
+
+    # ──────────────────────────────────────
+    # BFS
+    # ──────────────────────────────────────
+
+    def bfs(self, start, reverse=False):
+        queue   = deque([start])
+        visited = set()
+        path    = []
+        step    = 0
+        color   = "blue"
+        label   = "BFS2" if reverse else "BFS1"
+
+        self.task_text.append(
+            f"<b style='color:{color};'>── {label} bắt đầu từ {start} ──</b>"
+        )
+        while queue:
+            node = queue.popleft()
+            if node in visited:
+                continue
+            visited.add(node)
+            path.append(node)
+            nb_list = self.neighbors(*node, reverse=reverse)
+            self.task_text.append(
+                f"<span style='color:{color};'>Bước {step}:</span> "
+                f"Thăm <b>{node}</b> | Hàng xóm: {nb_list}"
+            )
+            step += 1
+            for nb in nb_list:
+                if nb not in visited:
+                    queue.append(nb)
+        return path
+
+    # ──────────────────────────────────────
+    # DFS
+    # ──────────────────────────────────────
+
+    def dfs(self, start, push_reversed=True):
+        stack   = [start]
+        visited = set()
+        path    = []
+        step    = 0
+        color   = "#27AE60"
+        label   = "DFS1" if push_reversed else "DFS2"
+
+        self.task_text.append(
+            f"<b style='color:{color};'>── {label} bắt đầu từ {start} ──</b>"
+        )
+        while stack:
+            node = stack.pop()
+            if node in visited:
+                continue
+            visited.add(node)
+            path.append(node)
+            nb_list   = self.neighbors(*node)
+            push_list = list(reversed(nb_list)) if push_reversed else nb_list
+            self.task_text.append(
+                f"<span style='color:{color};'>Bước {step}:</span> "
+                f"Thăm <b>{node}</b> | Stack push: {[n for n in push_list if n not in visited]}"
+            )
+            step += 1
+            for nb in push_list:
+                if nb not in visited:
+                    stack.append(nb)
+        return path
+
+    # ──────────────────────────────────────
+    # IDS
+    # ──────────────────────────────────────
+
+    def ids(self, start):
+        color       = "#8E44AD"
+        visited_all = []
+        seen_global = set()
+
+        self.task_text.append(
+            f"<b style='color:{color};'>── IDS bắt đầu từ {start} ──</b>"
+        )
+        for depth_limit in range(self.rows * self.cols + 1):
+            self.task_text.append(
+                f"<span style='color:{color};'><b>Vòng lặp độ sâu l = {depth_limit}</b></span>"
+            )
+            _, found = self._depth_limited_search(
+                start, depth_limit, color, visited_all, seen_global
+            )
+            if found:
+                break
+
+        seen = set()
+        path = []
+        for n in visited_all:
+            if n not in seen:
+                seen.add(n)
+                path.append(n)
+        return path
+
+    def _depth_limited_search(self, start, limit, color, visited_all, seen_global):
+        stack         = [(start, 0)]
+        local_visited = set()
+
+        while stack:
+            node, depth = stack.pop()
+            if node in local_visited:
+                continue
+            local_visited.add(node)
+            if node not in seen_global:
+                seen_global.add(node)
+                visited_all.append(node)
+            self.task_text.append(
+                f"&nbsp;&nbsp;<span style='color:{color};'>Thăm</span> "
+                f"<b>{node}</b> (sâu {depth}/{limit})"
+            )
+            if depth == limit:
+                continue
+            for nb in reversed(self.neighbors(*node)):
+                if nb not in local_visited:
+                    stack.append((nb, depth + 1))
+
+        all_reachable = self._count_reachable(start)
+        found = len(seen_global) >= all_reachable
+        return visited_all, found
+
+    def _count_reachable(self, start):
+        queue   = deque([start])
+        visited = {start}
+        while queue:
+            node = queue.popleft()
+            for nb in self.neighbors(*node):
+                if nb not in visited:
+                    visited.add(nb)
+                    queue.append(nb)
+        return len(visited)
+
+    # ──────────────────────────────────────
+    # GREEDY
+    # ──────────────────────────────────────
+
+    def greedy(self, start):
+        color   = "#E67E22"
+        counter = 0
+        h_start = self.heuristic(*start)
+        frontier = [(h_start, counter, start)]
+        heapq.heapify(frontier)
+        reached = set()
+        path    = []
+        step    = 0
+
+        self.task_text.append(
+            f"<b style='color:{color};'>── Greedy bắt đầu từ {start} ──</b>"
+        )
+        while frontier:
+            h_val, _, node = heapq.heappop(frontier)
+            if node in reached:
+                continue
+            reached.add(node)
+            path.append(node)
+            self.task_text.append(
+                f"<span style='color:{color};'>Bước {step}:</span> "
+                f"Chọn <b>{node}</b> | h(n)=<b>{h_val}</b>"
+            )
+            step += 1
+            for nb in self.neighbors(*node):
+                if nb not in reached:
+                    counter += 1
+                    h_nb = self.heuristic(*nb)
+                    heapq.heappush(frontier, (h_nb, counter, nb))
+                    self.task_text.append(
+                        f"&nbsp;&nbsp;→ Thêm {nb} | h={h_nb}"
+                    )
+        return path
+
+    # ──────────────────────────────────────
+    # A*
+    # ──────────────────────────────────────
+
+    def astar(self, start):
+        color   = "#C0392B"
+        g       = {start: 0}
+        h_start = self.heuristic(*start)
+        counter = 0
+        frontier = [(h_start, counter, start)]
+        heapq.heapify(frontier)
+        reached = {}
+        path    = []
+        step    = 0
+
+        self.task_text.append(
+            f"<b style='color:{color};'>── A* bắt đầu từ {start} ──</b>"
+        )
+        while frontier:
+            f_val, _, node = heapq.heappop(frontier)
+            if node in reached:
+                continue
+            reached[node] = g.get(node, float('inf'))
+            path.append(node)
+            g_node = g.get(node, 0)
+            h_node = self.heuristic(*node)
+            self.task_text.append(
+                f"<span style='color:{color};'>Bước {step}:</span> "
+                f"Chọn <b>{node}</b> | g={g_node}, h={h_node}, f={g_node+h_node}"
+            )
+            step += 1
+            for nb in self.neighbors(*node):
+                g_new = g_node + 1
+                if nb not in g or g_new < g[nb]:
+                    g[nb]    = g_new
+                    h_nb     = self.heuristic(*nb)
+                    f_nb     = g_new + h_nb
+                    counter += 1
+                    heapq.heappush(frontier, (f_nb, counter, nb))
+                    self.task_text.append(
+                        f"&nbsp;&nbsp;→ Cập nhật {nb} | g={g_new}, h={h_nb}, f={f_nb}"
+                    )
+        return path
+
+    # ──────────────────────────────────────
+    # ANIMATION
+    # ──────────────────────────────────────
+
+    def run_animation(self):
+        # ── HOÀN THÀNH ──
+        if self.current_step >= len(self.path):
+            self.timer.stop()
+
+            remain = sum(
+                1 for r in range(self.rows)
+                for c in range(self.cols)
+                if self.cells[r][c].state == 1 and not self.cells[r][c].cleaned
+            )
+
+            if remain > 0:
+                self.status_label.setText("Trạng thái: Không có giải pháp!")
+                self.task_text.append(
+                    "<br><b style='color:red;'>==> Không thể dọn sạch toàn bộ bụi!</b>"
+                )
+                self.solution_text.clear()
+                self.solution_text.append(
+                    "<h2 style='color:red;'>KHÔNG TỒN TẠI GIẢI PHÁP</h2>"
+                    f"<p>Còn lại {remain} ô bụi không tiếp cận được.</p>"
+                )
+            else:
+                self.status_label.setText("Trạng thái: Hoàn thành! ✅")
+                self.task_text.append(
+                    "<br><b style='color:green;'>==> Hoàn thành! ✅</b>"
+                )
+                self.show_final_solution()
+            return
+
+        # ── DI CHUYỂN ROBOT ──
+        r, c = self.path[self.current_step]
+        cell = self.cells[r][c]
+
+        # di chuyển icon robot
+        self.robot_label.move_to_cell(r, c)
+
+        # ô trước đó tô xanh (nếu không phải vật cản)
+        if self.current_step > 0:
+            pr, pc = self.path[self.current_step - 1]
+            prev_cell = self.cells[pr][pc]
+            if prev_cell.state != 2:
+                prev_cell.cleaned = True
+                prev_cell.update_color()
+
+        # ô hiện tại: hút bụi ngay lập tức
+        if cell.state == 1:
+            cell.state   = 0
+            cell.cleaned = True
+            cell.update_color()
+        elif cell.state == 0:
+            cell.cleaned = True
+            cell.update_color()
+
+        # log
+        color_map = {
+            "BFS1": "blue",    "BFS2": "blue",
+            "DFS1": "#27AE60", "DFS2": "#27AE60",
+            "IDS":  "#8E44AD", "Greedy": "#E67E22", "A*": "#C0392B",
+        }
+        color = color_map.get(self.algorithm, "black")
+
+        dust_info = " → 🧹 <b>Phát hiện bụi → Đã hút sạch!</b>" if cell.state == 0 and cell.cleaned else " → ✓ Ô sạch"
+        # nếu bụi vừa bị hút, state đã là 0
+        had_dust = (cell.cleaned and self.current_step < len(self.path))
+
+        self.task_text.append(
+            f"<span style='color:{color};'>▶ Bước {self.current_step}:</span> "
+            f"Robot đến <b>({r},{c})</b>{dust_info}"
+        )
+
+        sb = self.task_text.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+        self.status_label.setText(
+            f"Đang chạy: {self.algorithm} | Bước {self.current_step} | Robot tại ({r},{c})"
+        )
+        self.current_step += 1
+
+
+    # ──────────────────────────────────────
+    # SILENT ALGO RUNNERS (không log task)
+    # ──────────────────────────────────────
+
+    def _silent_bfs(self, start, reverse=False):
+        queue   = deque([start])
+        visited = set()
+        path    = []
+        while queue:
+            node = queue.popleft()
+            if node in visited:
+                continue
+            visited.add(node)
+            path.append(node)
+            for nb in self.neighbors(*node, reverse=reverse):
+                if nb not in visited:
+                    queue.append(nb)
+        return path
+
+    def _silent_dfs(self, start, push_reversed=True):
+        stack   = [start]
+        visited = set()
+        path    = []
+        while stack:
+            node = stack.pop()
+            if node in visited:
+                continue
+            visited.add(node)
+            path.append(node)
+            nb_list   = self.neighbors(*node)
+            push_list = list(reversed(nb_list)) if push_reversed else nb_list
+            for nb in push_list:
+                if nb not in visited:
+                    stack.append(nb)
+        return path
+
+    def _silent_ids(self, start):
+        visited_all = []
+        seen_global = set()
+        for depth_limit in range(self.rows * self.cols + 1):
+            stack         = [(start, 0)]
+            local_visited = set()
+            while stack:
+                node, depth = stack.pop()
+                if node in local_visited:
+                    continue
+                local_visited.add(node)
+                if node not in seen_global:
+                    seen_global.add(node)
+                    visited_all.append(node)
+                if depth == depth_limit:
+                    continue
+                for nb in reversed(self.neighbors(*node)):
+                    if nb not in local_visited:
+                        stack.append((nb, depth + 1))
+            if len(seen_global) >= self._count_reachable(start):
+                break
+        seen = set()
+        path = []
+        for n in visited_all:
+            if n not in seen:
+                seen.add(n)
+                path.append(n)
+        return path
+
+    def _silent_greedy(self, start):
+        counter  = 0
+        frontier = [(self.heuristic(*start), counter, start)]
+        heapq.heapify(frontier)
+        reached  = set()
+        path     = []
+        while frontier:
+            h_val, _, node = heapq.heappop(frontier)
+            if node in reached:
+                continue
+            reached.add(node)
+            path.append(node)
+            for nb in self.neighbors(*node):
+                if nb not in reached:
+                    counter += 1
+                    heapq.heappush(frontier, (self.heuristic(*nb), counter, nb))
+        return path
+
+    def _silent_astar(self, start):
+        g        = {start: 0}
+        counter  = 0
+        frontier = [(self.heuristic(*start), counter, start)]
+        heapq.heapify(frontier)
+        reached  = {}
+        path     = []
+        while frontier:
+            f_val, _, node = heapq.heappop(frontier)
+            if node in reached:
+                continue
+            reached[node] = g.get(node, float('inf'))
+            path.append(node)
+            g_node = g.get(node, 0)
+            for nb in self.neighbors(*node):
+                g_new = g_node + 1
+                if nb not in g or g_new < g[nb]:
+                    g[nb] = g_new
+                    counter += 1
+                    heapq.heappush(frontier, (g_new + self.heuristic(*nb), counter, nb))
+        return path
+
+    def _run_all_silent(self, start):
+        """Chạy tất cả 7 thuật toán silent, trả về dict {algo: path}."""
+        return {
+            "BFS1":   self._silent_bfs(start, reverse=False),
+            "BFS2":   self._silent_bfs(start, reverse=True),
+            "DFS1":   self._silent_dfs(start, push_reversed=True),
+            "DFS2":   self._silent_dfs(start, push_reversed=False),
+            "IDS":    self._silent_ids(start),
+            "Greedy": self._silent_greedy(start),
+            "A*":     self._silent_astar(start),
+        }
+
+    # ──────────────────────────────────────
+    # FINAL SOLUTION WITH COMPARISON
+    # ──────────────────────────────────────
+
+    def _count_dust_cleaned(self, path):
+        """Đếm số ô bụi (state==1) xuất hiện trong path."""
+        cleaned = 0
+        seen_dust = set()
+        for r, c in path:
+            if self.cells[r][c].state == 1 and (r, c) not in seen_dust:
+                cleaned += 1
+                seen_dust.add((r, c))
+        return cleaned
+
+    def show_final_solution(self):
+        self.solution_text.clear()
+
+        current_algo  = self.algorithm
+        current_steps = len(self.path)
+        start         = self.start_pos
+
+        # chạy tất cả thuật toán silent
+        all_results = self._run_all_silent(start)
+
+        # màu của từng thuật toán
+        color_map = {
+            "BFS1":   "#2F80ED", "BFS2":   "#2F80ED",
+            "DFS1":   "#27AE60", "DFS2":   "#27AE60",
+            "IDS":    "#8E44AD", "Greedy": "#E67E22", "A*": "#C0392B",
+        }
+
+        # tìm thuật toán tối ưu (ít bước nhất)
+        best_algo  = min(all_results, key=lambda a: len(all_results[a]))
+        best_steps = len(all_results[best_algo])
+
+        # ── HEADER ──
+        self.solution_text.append(
+            f"<h2 style='color:#1E2A38;margin:0;'>📊 KẾT QUẢ & SO SÁNH THUẬT TOÁN</h2>"
+            f"<p style='color:#555;margin:2px 0;'>"
+            f"Vị trí bắt đầu: <b>{start}</b> &nbsp;|&nbsp; "
+            f"Thuật toán đang chạy: <b style='color:{color_map[current_algo]};'>{current_algo}</b>"
+            f"</p><hr>"
+        )
+
+        # ── BẢNG SO SÁNH ──
+        self.solution_text.append(
+            "<b style='font-size:15px;'>🔢 BẢNG SO SÁNH TẤT CẢ THUẬT TOÁN:</b><br>"
+        )
+
+        # header bảng
+        self.solution_text.append(
+            "<table width='100%' style='border-collapse:collapse;font-size:13px;'>"
+            "<tr style='background:#1E2A38;color:white;'>"
+            "<td style='padding:5px 8px;'><b>Thuật toán</b></td>"
+            "<td style='padding:5px 8px;text-align:center;'><b>Số bước</b></td>"
+            "<td style='padding:5px 8px;text-align:center;'><b>So với hiện tại</b></td>"
+            "<td style='padding:5px 8px;text-align:center;'><b>Đánh giá</b></td>"
+            "</tr>"
+        )
+
+        for i, (algo, path) in enumerate(all_results.items()):
+            steps   = len(path)
+            col     = color_map[algo]
+            bg      = "#F0F8FF" if i % 2 == 0 else "white"
+
+            is_current = (algo == current_algo)
+            is_best    = (steps == best_steps)
+
+            # badge
+            badge = ""
+            if is_best and is_current:
+                badge = "⭐ TỐI ƯU + ĐANG CHẠY"
+                badge_color = "#C0392B"
+            elif is_best:
+                badge = "⭐ TỐI ƯU"
+                badge_color = "#27AE60"
+            elif is_current:
+                badge = "▶ ĐANG CHẠY"
+                badge_color = col
+            else:
+                badge = "–"
+                badge_color = "#888"
+
+            # diff
+            diff = steps - current_steps
+            if diff > 0:
+                diff_str  = f"<span style='color:red;'>+{diff} bước</span>"
+            elif diff < 0:
+                diff_str  = f"<span style='color:green;'>{diff} bước</span>"
+            else:
+                diff_str  = f"<span style='color:#888;'>= bằng nhau</span>"
+
+            # row highlight nếu là thuật toán hiện tại
+            row_style = f"background:#FFF9E6;font-weight:bold;" if is_current else f"background:{bg};"
+
+            self.solution_text.append(
+                f"<tr style='{row_style}'>"
+                f"<td style='padding:5px 8px;color:{col};font-weight:bold;'>{algo}</td>"
+                f"<td style='padding:5px 8px;text-align:center;'>{steps}</td>"
+                f"<td style='padding:5px 8px;text-align:center;'>{diff_str}</td>"
+                f"<td style='padding:5px 8px;text-align:center;color:{badge_color};'><b>{badge}</b></td>"
+                f"</tr>"
+            )
+
+        self.solution_text.append("</table><br>")
+
+        # ── KẾT LUẬN TỐI ƯU ──
+        opt_color = color_map[best_algo]
+        if best_algo == current_algo:
+            conclude = (
+                f"<p style='background:#E8F5E9;border-left:4px solid #27AE60;padding:8px;margin:4px 0;'>"
+                f"✅ <b>{current_algo}</b> đang chạy chính là thuật toán <b>tối ưu nhất</b> "
+                f"với <b>{best_steps} bước</b> cho bản đồ này!"
+                f"</p>"
+            )
+        else:
+            saved = current_steps - best_steps
+            conclude = (
+                f"<p style='background:#FFF3E0;border-left:4px solid #E67E22;padding:8px;margin:4px 0;'>"
+                f"⚡ Thuật toán tối ưu hơn là <b style='color:{opt_color};'>{best_algo}</b> "
+                f"với <b>{best_steps} bước</b> "
+                f"(tiết kiệm <b style='color:green;'>{saved} bước</b> so với {current_algo} [{current_steps} bước])."
+                f"</p>"
+            )
+
+        self.solution_text.append(conclude)
+
+        # ── ĐƯỜNG ĐI HIỆN TẠI ──
+        self.solution_text.append(
+            f"<br><b style='color:{color_map[current_algo]};'>📍 Đường đi của {current_algo} "
+            f"({current_steps} bước):</b><br>"
+        )
+        step_chunks = []
+        for i, pos in enumerate(self.path):
+            step_chunks.append(f"<b>{i}</b>:{pos}")
+        self.solution_text.append(
+            " → ".join(step_chunks)
+        )
+
+        # ── ĐƯỜNG ĐI TỐI ƯU (nếu khác) ──
+        if best_algo != current_algo:
+            best_path = all_results[best_algo]
+            self.solution_text.append(
+                f"<br><br><b style='color:{opt_color};'>⭐ Đường đi tối ưu của {best_algo} "
+                f"({best_steps} bước):</b><br>"
+            )
+            opt_chunks = []
+            for i, pos in enumerate(best_path):
+                opt_chunks.append(f"<b>{i}</b>:{pos}")
+            self.solution_text.append(
+                " → ".join(opt_chunks)
+            )
+
+
+# ─────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────
+
+app = QApplication(sys.argv)
+window = VacuumApp()
+window.show()
+sys.exit(app.exec())
